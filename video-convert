@@ -1,0 +1,117 @@
+#!/bin/bash
+
+# Enable alsologtostderr so that LOG INFO is shown.
+: ${IMOSH_FLAGS_alsologtostderr:=1}
+
+source "$(dirname "${BASH_SOURCE}")"/imosh || exit 1
+
+DEFINE_int threads 0 'Number of threads.'
+DEFINE_int probesize 1 \
+    'Probe size multiplier.  Some stream such as a subtitle stream may not be' \
+    'found because the stream does not exist in the beginning.  This flag' \
+    'extends the size to probe.'
+DEFINE_bool deinterlace false 'Enables deinterlace.'
+DEFINE_int subtitle '-1' "Subtitle's stream ID to overlay."
+DEFINE_string video 'v' \
+    "Video's stream ID.  Use the first stream of audio streams."
+DEFINE_string audio 'a' \
+    "Audio's stream ID.  Use the first stream of audio streams."
+DEFINE_string output '' \
+    'Video output.  This command shows stream details if this is not specified.'
+
+eval "${IMOSH_INIT}"
+
+FFMPEG_PREPROCESS_FLAGS=()
+FFMPEG_FLAGS=()
+FFMPEG_POSTPROCESS_FLAGS=()
+
+if [ "$#" = 0 ]; then
+  LOG FATAL 'Input file(s) must be specified.'
+fi
+
+run_ffmepg() {
+  local flags=()
+  if [ "${#FFMPEG_PREPROCESS_FLAGS[@]}" != 0 ]; then
+    flags+=("${FFMPEG_PREPROCESS_FLAGS[@]}")
+  fi
+  if [ "${#FFMPEG_FLAGS[@]}" != 0 ]; then
+    flags+=("${FFMPEG_FLAGS[@]}")
+  fi
+  if [ "${#FFMPEG_POSTPROCESS_FLAGS[@]}" != 0 ]; then
+    flags+=("${FFMPEG_POSTPROCESS_FLAGS[@]}")
+  fi
+
+  LOG INFO 'Running: ffmpeg' "${flags[@]}"
+  ffmpeg "${flags[@]}"
+}
+
+set_input() {
+  local input
+  for input in "$@"; do
+    FFMPEG_FLAGS+=('-i' "${input}")
+  done
+}
+
+set_probe_flags() {
+  if (( FLAGS_probesize <= 1 )); then return; fi
+  # Increases size and duration to probe streams.
+  FFMPEG_PREPROCESS_FLAGS+=(
+      '-probesize' "$(expr "${FLAGS_probesize}" '*' 5)M"
+      '-analyzeduration' "$(expr "${FLAGS_probesize}" '*' 5)M"
+  )
+}
+
+set_video_flags() {
+  if [ "${FLAGS_video}" = '' ]; then return; fi
+  if (( FLAGS_deinterlace )); then
+    FFMPEG_FLAGS+=(
+        '-deinterlace' '-filter:v' 'yadif')
+  fi
+
+  FFMPEG_FLAGS+=(
+      -y -vcodec libx264 -bufsize 512k -coder 1 -g 250
+      -flags +loop -partitions +parti8x8+parti4x4+partp8x8+partb8x8
+      -me_method hex -subq 7 -me_range 16 -g 250 -keyint_min 25
+      -sc_threshold 40
+      -i_qfactor 0.71 -b_strategy 1 -qcomp 0.6 -qmin 10 -qmax 51 -qdiff 4
+      -direct-pred 3 -fast-pskip 1
+  )
+
+  local filters=()
+  if (( FLAGS_subtitle > 0 )); then
+    filters+=(
+        "[0:${FLAGS_subtitle}]setpts=PTS+0/TB[SUB]"
+        "[0:${FLAGS_video}][SUB]overlay")
+  fi
+  if [ "${#filters[@]}" != 0 ]; then
+    FFMPEG_POSTPROCESS_FLAGS+=(-filter_complex "$(php::implode ';' filters)")
+  fi
+}
+
+set_audio_flags() {
+  if [ "${FLAGS_audio}" = '' ]; then return; fi
+  FFMPEG_FLAGS+=(-acodec libfaac -ac 2 -ar 48000 -ab 128k)
+}
+
+set_output_flags() {
+  if [ "${FLAGS_output}" = '' ]; then return; fi
+
+  if (( FLAGS_threads > 0 )); then
+    FFMPEG_PREPROCESS_FLAGS+=(-threads "${FLAGS_threads}")
+  fi
+
+  set_video_flags
+  set_audio_flags
+
+  FFMPEG_POSTPROCESS_FLAGS+=(-f ipod)
+  FFMPEG_POSTPROCESS_FLAGS+=("${FLAGS_output}")
+}
+
+main() {
+  set_input "$@"
+  set_probe_flags
+  set_output_flags
+  run_ffmepg
+}
+
+main "$@"

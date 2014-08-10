@@ -1,0 +1,848 @@
+#!/bin/bash
+# Last update: 2014-08-10 22:26:03 +0900 (9317500)
+#
+# imosh - Libraries for BASH.
+
+if ! shopt login_shell >/dev/null; then
+  set -e -u
+fi
+
+if [ "${__IMOSH_IS_LOADED+loaded}" == 'loaded' ]; then
+  return
+fi
+__IMOSH_IS_LOADED=loaded
+
+print() {
+  printf "%s" "$*"
+}
+
+__IMOSH_PROGRAM_NAME="${0##*/}"
+__IMOSH_HOSTNAME="$(hostname -s)"
+__IMOSH_USER="${USER}"
+__IMOSH_LOG_PREFIX="${__IMOSH_PROGRAM_NAME}.${__IMOSH_HOSTNAME}.${__IMOSH_USER}"
+__IMOSH_LOG_DIR="${TMPDIR:-/tmp}"
+__IMOSH_LOG_SUFFIX="$(date +'%Y%m%d.%H%M%S').$$"
+
+imosh::internal::log_file() {
+  local severity="${1}"
+  local path=''
+  path+="${__IMOSH_LOG_DIR}/"
+  path+="${__IMOSH_LOG_PREFIX}.${severity}.${__IMOSH_LOG_SUFFIX}"
+  print "${path}"
+}
+
+# Close descriptors for logs beforehand for BASH3's bug.
+exec 101>&- 102>&- 103>&- 104>&-
+
+if [ -w "${__IMOSH_LOG_DIR}" ]; then
+  exec 101>"$(imosh::internal::log_file INFO)"
+  exec 102>"$(imosh::internal::log_file WARNING)"
+  exec 103>"$(imosh::internal::log_file ERROR)"
+  exec 104>"$(imosh::internal::log_file FATAL)"
+else
+  exec 101>/dev/null 102>/dev/null 103>/dev/null 104>/dev/null
+  echo "failed to open files to write logs: ${__IMOSH_LOG_DIR}" >&2
+fi
+
+imosh::get_child_processes() {
+  local ppid="$1"
+  ps -axo ppid,pid | awk "{ if (\$1 == ${ppid}) print \$2; }"
+}
+
+imosh::internal::style() {
+  echo -en "\\033[${1}m"
+}
+
+IMOSH_STYLE_DEFAULT="$(imosh::internal::style '0')"
+IMOSH_COLOR_DEFAULT="$(imosh::internal::style '0;39')"
+IMOSH_COLOR_BLACK="$(imosh::internal::style '0;30')"
+IMOSH_COLOR_RED="$(imosh::internal::style '0;31')"
+IMOSH_COLOR_GREEN="$(imosh::internal::style '0;32')"
+IMOSH_COLOR_YELLOW="$(imosh::internal::style '0;33')"
+IMOSH_COLOR_BLUE="$(imosh::internal::style '0;34')"
+IMOSH_COLOR_MAGENTA="$(imosh::internal::style '0;35')"
+IMOSH_COLOR_CYAN="$(imosh::internal::style '0;36')"
+IMOSH_COLOR_WHITE="$(imosh::internal::style '0;37')"
+
+imosh::shell_escape() {
+  local arg
+  local search="'"
+  local replace="'\"'\"'"
+  for arg in "$@"; do
+    arg="${arg//${search}/${replace}}"
+    echo -n "'${arg}'"
+  done
+}
+
+imosh::on_exit() {
+  echo "$@" >>"${__IMOSH_CORE_TMPDIR}/on_exit.sh"
+}
+
+imosh::internal::error_handler() {
+  imosh::stack_trace "error status: $?"
+}
+
+imosh::internal::exit_handler() {
+  LOG INFO "finalizing..."
+
+  set +e
+  if [ -f "${__IMOSH_CORE_TMPDIR}/on_exit.sh" ]; then
+    source "${__IMOSH_CORE_TMPDIR}/on_exit.sh"
+  fi
+  rm -rf "${__IMOSH_CORE_TMPDIR}"
+
+  # Close log pipes and remove unused log files.
+  exec 101>&- 102>&- 103>&- 104>&-
+  local severity=''
+  for severity in INFO WARNING ERROR FATAL; do
+    local path="$(imosh::internal::log_file "${severity}")"
+    if [ ! -s "${path}" ]; then
+      rm "${path}"
+    fi
+  done
+}
+
+imosh::internal::signal_handler() {
+  local signal="$1"
+  LOG ERROR "$(imosh::stack_trace "terminated by signal: ${signal}" 2>&1)"
+  trap - "${signal}"
+  kill -s "${signal}" $$
+}
+
+trap imosh::internal::exit_handler EXIT
+trap imosh::internal::error_handler ERR
+if ! shopt login_shell >/dev/null; then
+  for signal in SIGHUP SIGINT SIGPIPE SIGTERM \
+                SIGXCPU SIGXFSZ SIGUSR1 SIGUSR2; do
+    trap "imosh::internal::signal_handler ${signal}" "${signal}"
+  done
+fi
+
+LOG() {
+  local level="$1"
+  shift
+
+  case "${level}" in
+    INFO|WARNING|ERROR|FATAL) :;;
+    *) LOG FATAL "no such log level: ${level}"
+  esac
+  local datetime="$(date +'%m%d %T.%N')"
+  # For systems not supporting %N in date.
+  datetime="${datetime/.N/.000000}"
+  datetime="${datetime:0:20}"
+  local pid="$$"
+  if php::isset __IMOSH_LOG_PID; then
+    pid="${__IMOSH_LOG_PID}"
+  fi
+  local message=(
+      "${level:0:1}${datetime}"
+      "${pid}"
+      "${BASH_SOURCE[1]##*/}:${BASH_LINENO[0]}]"
+      "$*")
+  message="${message[*]}"
+  if [ "${level}" == 'FATAL' ]; then
+    message+=$'\n'
+    message+="$(imosh::stack_trace '*** Check failure stack trace: ***' 2>&1)"
+  fi
+  local logtostderr=0
+  if php::isset FLAGS_logtostderr; then
+    logtostderr="${FLAGS_logtostderr}"
+  fi
+  local alsologtostderr=0
+  if php::isset FLAGS_alsologtostderr; then
+    alsologtostderr="${FLAGS_alsologtostderr}"
+  fi
+  case "${level}" in
+    INFO)
+      if (( logtostderr || alsologtostderr )); then
+        echo "${message}" >&2
+      fi
+      if (( ! logtostderr )); then
+        echo "${message}" >&101
+      fi
+      ;;
+    WARNING)
+      if (( logtostderr || alsologtostderr )); then
+        echo "${message}" >&2
+      fi
+      if (( ! logtostderr )); then
+        echo "${message}" >&101
+        echo "${message}" >&102
+      fi
+      ;;
+    ERROR)
+      echo "${message}" >&2
+      if (( ! logtostderr )); then
+        echo "${message}" >&101
+        echo "${message}" >&102
+        echo "${message}" >&103
+      fi
+      ;;
+    FATAL)
+      echo "${message}" >&2
+      if (( ! logtostderr )); then
+        echo "${message}" >&101
+        echo "${message}" >&102
+        echo "${message}" >&103
+        echo "${message}" >&104
+      fi
+      exit 1
+      ;;
+  esac
+}
+
+# Parses arguments without getopt.
+imosh::internal::parse_args() {
+  local class_name="$1"; shift
+
+  local upper_class_name="$(php::strtoupper "${class_name}")"
+  local arg arg_name arg_value
+  IMOSH_ARGV=()
+  IMOSH_ARGS=()
+  while [ "$#" != '0' ]; do
+    local arg="$1"
+    shift
+    if [ "${arg:0:1}" != '-' ]; then
+      IMOSH_ARGV+=("${arg}")
+      continue
+    fi
+    if [[ "${arg}" =~ ^-[0-9] ]]; then
+      IMOSH_ARGV+=("${arg}")
+      continue
+    fi
+    if [ "${arg}" == '--' ]; then
+      IMOSH_ARGV+=("$@")
+      break
+    fi
+    case "${arg}" in
+      --*) arg="${arg:2}";;
+      -*) arg="${arg:1}";;
+    esac
+    arg_name="${arg%%=*}"
+    if [[ ! "${arg_name}" =~ ^[a-zA-Z_][a-zA-Z0-9_]*$ ]]; then
+      LOG FATAL "${class_name} name is bad: ${arg_name}"
+    fi
+    arg_value="${arg:${#arg_name}}"
+    if [ "${arg_value:0:1}" != '=' ]; then
+      if [ "${arg_name:0:2}" == 'no' ]; then
+        if php::isset "${upper_class_name}S_${arg_name:2}"; then
+          if [ "${class_name}" == 'flag' ] && \
+             [ "$(imosh::internal::flag_type "${arg_name:2}")" != 'bool' ]; then
+            LOG FATAL "the ${arg_name:2} flag is not a bool flag"
+          fi
+          IMOSH_ARGS+=("${upper_class_name}S_${arg_name:2}=0")
+          continue
+        fi
+      fi
+      if php::isset "${upper_class_name}S_${arg_name}"; then
+        if [ "${class_name}" == 'flag' ] && \
+           [ "$(imosh::internal::flag_type "${arg_name}")" != 'bool' ]; then
+          LOG FATAL "the ${arg_name} flag is not a bool flag"
+        fi
+        IMOSH_ARGS+=("${upper_class_name}S_${arg_name}=1")
+        continue
+      fi
+      LOG FATAL "no such bool ${class_name} is defined:" \
+                "(${upper_class_name}S_)${arg_name}"
+    fi
+    arg_value="${arg_value:1}"
+    if php::isset "${upper_class_name}S_${arg_name}"; then
+      if [ "${class_name}" == 'flag' ]; then
+        if ! imosh::internal::convert_type \
+               "$(imosh::internal::flag_type "${arg_name}")" \
+               "${arg_value}" >/dev/null; then
+          LOG FATAL "the ${arg_name} flag has an invalid value: ${arg_value}"
+        else
+          arg_value="$(imosh::internal::convert_type \
+                             "$(imosh::internal::flag_type "${arg_name}")" \
+                             "${arg_value}")"
+        fi
+      fi
+      IMOSH_ARGS+=("${upper_class_name}S_${arg_name}=${arg_value}")
+      continue
+    fi
+    LOG FATAL "no such ${class_name} is defined:" \
+              "(${upper_class_name}S_)${arg_name}"
+  done
+}
+
+readonly IMOSH_PARSE_ARGUMENTS='
+    local IMOSH_ARGV IMOSH_ARGS
+    imosh::internal::parse_args arg "$@"
+    if [ "${#IMOSH_ARGS[@]}" -ne 0 ]; then
+      readonly "${IMOSH_ARGS[@]}"
+    fi
+    if [ "${#IMOSH_ARGV[@]}" -ne 0 ]; then
+      set -- "${IMOSH_ARGV[@]}"
+    fi'
+
+php::addslashes() {
+  if [ "$#" -ne 1 ]; then
+    LOG FATAL 'php::addslashes requires one argument.'
+  fi
+
+  local subject="${1}"
+  subject="$(php::str_replace '\' '\\' "${subject}")"
+  subject="$(php::str_replace "'" "\\'" "${subject}")"
+  print "${subject}"
+}
+
+php::array_map() {
+  if [ "$#" -ne 2 ]; then
+    LOG FATAL 'php::array_map requires two arguments.'
+  fi
+
+  local __array_map_callback="${1}"
+  local __array_map_name="${2}"
+  eval "local __array_map_values=(\"\${${__array_map_name}[@]}\")"
+  local __array_map_i=0 __array_map_size="${#__array_map_values[@]}"
+  while (( __array_map_i < __array_map_size )); do
+    local __array_map_value="${__array_map_values[${__array_map_i}]}"
+    __array_map_value="$("${__array_map_callback}" "${__array_map_value}")"
+    eval "${__array_map_name}[${__array_map_i}]='$(
+              php::addslashes "${__array_map_value}")'"
+    (( __array_map_i += 1 )) || true
+  done
+}
+
+php::array_unique() {
+  if [ "$#" -ne 1 ]; then
+    LOG FATAL 'php::array_unique requires one argument.'
+  fi
+
+  local __array_unique_name="${1}"
+  eval "local __array_unique_values=(\"\${${__array_unique_name}[@]}\")"
+  php::sort __array_unique_values
+  local __array_unique_i=1 __array_unique_size="${#__array_unique_values[@]}"
+  while (( __array_unique_i < __array_unique_size )); do
+    local __array_unique_last_i=0
+    (( __array_unique_last_i = __array_unique_i - 1 )) || true
+    if [ "${__array_unique_values[${__array_unique_i}]}" == \
+         "${__array_unique_values[${__array_unique_last_i}]}" ]; then
+      unset __array_unique_values["${__array_unique_last_i}"]
+    fi
+    (( __array_unique_i += 1 )) || true
+  done
+  eval "${__array_unique_name}=(\"\${__array_unique_values[@]}\")"
+}
+
+php::bin2hex() {
+  if [ "$#" -eq 0 ]; then
+    od -An -tx1 | tr -d ' \n'
+  else
+    print "$*" | php::bin2hex
+  fi
+}
+
+php::explode() {
+  local __explode_name="${1}"
+  local __explode_delimiter="${2}"
+  local __explode_value="${3}"
+
+  __explode_value="$(
+      php::str_replace "${__explode_delimiter}" $'\x02' "${__explode_value}")"
+  eval "IFS=\$'\\x02' ${__explode_name}=(\$__explode_value)"
+}
+
+php::hex2bin() {
+  local message="$(
+      print "$*" | tr -c -d '[0-9a-fA-F]' | fold -w 2 \
+          | sed -e 's/^/\\x/' | tr -d '[:space:]')"
+  printf "${message}"
+}
+
+php::implode() {
+  local __implode_delimiter="${1}"
+  local __implode_name="${2}"
+
+  eval "local __implode_values=(\"\${${__implode_name}[@]}\")"
+  local __implode_size="${#__implode_values[@]}"
+  local i=0
+  local output=''
+  while (( i < __implode_size )); do
+    if (( i != 0 )); then output+="${__implode_delimiter}"; fi
+    output+="${__implode_values[${i}]}"
+    (( i += 1 )) || true
+  done
+  print "${output}"
+}
+
+# CAVEATS:
+#     isset returns true for uninitialized variables in BASH 3, and returns
+#     false for them in BASH 4.
+php::isset() {
+  local variable_name="$1"
+
+  if [ "$(eval echo '${'"${variable_name}"'+set}')" == '' ]; then
+    return 1
+  fi
+  return 0
+}
+
+php::ltrim() {
+  local value="$*"
+  print "${value#"${value%%[![:space:]]*}"}"
+}
+
+php::md5() {
+  if which openssl >/dev/null 2>/dev/null; then
+    print "${1}" | openssl md5 -binary | php::bin2hex
+  elif which md5sum >/dev/null 2>/dev/null; then
+    print "${1}" | md5sum -b | php::bin2hex
+  else
+    LOG FATAL 'no command for md5 is found.'
+  fi
+}
+
+php::ord() {
+  printf '%d' \'"${1}"
+}
+
+php::preg_match() {
+  local __preg_match_pattern="${1}"
+  local __preg_match_subject="${2}"
+  local __preg_match_name=''
+
+  if [ "$#" -ge 3 ]; then __preg_match_name="${3}"; fi
+  local __preg_match_result
+  if ! php::internal::run "
+      if (!preg_match('$(php::addslashes "${__preg_match_pattern}")',
+                      '$(php::addslashes "${__preg_match_subject}")',
+                      \$match)) { return 1; }
+      echo implode(\"\\x02\", \$match); return 0;" __preg_match_result; then
+    return 1
+  else
+    php::explode "${__preg_match_name}" $'\x02' "${__preg_match_result}"
+  fi
+}
+
+php::rand() {
+  if [ "$#" -eq 0 ]; then
+    php::rand 0 2147483647
+    return
+  fi
+  if [ "$#" -ne 2 ]; then
+    LOG FATAL 'php::rand requires zero or two arguments.'
+  fi
+
+  local min="${1}" max="${2}" range=0
+  (( range = max - min + 1 )) || true
+  if [ "${range}" -lt 1 ]; then
+    LOG FATAL "min must be larger than max: min=${min}, max=${max}"
+  fi
+  if [ "${range}" -eq 1 ]; then
+    print "${min}"
+    return
+  fi
+  local rand=0
+  (( rand = RANDOM ^ (RANDOM << 8) ^
+            (RANDOM << 16) ^ (RANDOM << 24) ^
+            (RANDOM << 32) ^ (RANDOM << 40) ^
+            (RANDOM << 48) ^ (RANDOM << 56) )) || true
+  (( rand = min + ( rand % range + range ) % range )) || true
+  print "${rand}"
+}
+
+php::rtrim() {
+  local value="$*"
+  print "${value%"${value##*[![:space:]]}"}"
+}
+
+php::internal::set_pivot() {
+  local pivot_index=0
+  (( pivot_index = left + (right - left) / 2 )) || true
+  local x="${__sort_values[${left}]}"
+  local y="${__sort_values[${pivot_index}]}"
+  local z="${__sort_values[${right}]}"
+
+  if [ "${x}" \< "${y}" ]; then
+    if [ "${y}" \< "${z}" ]; then
+      pivot="${y}"
+    elif [ "${z}" \< "${x}" ]; then
+      pivot="${x}"
+    else
+      pivot="${z}"
+    fi
+  else
+    if [ "${z}" \< "${y}" ]; then
+      pivot="${y}"
+    elif [ "${x}" \< "${z}" ]; then
+      pivot="${x}"
+    else
+      pivot="${z}"
+    fi
+  fi
+}
+
+php::internal::quick_sort() {
+  local left="${1}" right="${2}"
+  local i="${left}" j="${right}"
+  if [ "${left}" -ge "${right}" ]; then return; fi
+  local pivot=''
+  php::internal::set_pivot
+  while :; do
+    while [ "${__sort_values[${i}]}" \< "${pivot}" ]; do
+      (( i += 1 )) || true
+    done
+    while [ "${pivot}" \< "${__sort_values[${j}]}" ]; do
+      (( j -= 1 )) || true
+    done
+    if [ "${i}" -ge "${j}" ]; then break; fi
+    local value="${__sort_values[${i}]}"
+    __sort_values["${i}"]="${__sort_values[${j}]}"
+    __sort_values["${j}"]="${value}"
+    (( i += 1 )) || true
+    (( j -= 1 )) || true
+  done
+  (( i -= 1 )) || true
+  (( j += 1 )) || true
+  php::internal::quick_sort "${left}" "${i}"
+  php::internal::quick_sort "${j}" "${right}"
+}
+
+php::sort() {
+  local __sort_name="${1}"
+  eval "local __sort_values=(\"\${${__sort_name}[@]}\")"
+  local __sort_size="${#__sort_values[@]}"
+  (( __sort_size -= 1 )) || true
+  php::internal::quick_sort 0 "${__sort_size}"
+  eval "${__sort_name}=(\"\${__sort_values[@]}\")"
+}
+
+# Usage:
+#   php::str_replace <search> <replace> <subject>
+php::str_replace() {
+  local search="${1}"
+  local replace="${2}"
+  local subject="${3}"
+
+  print "${subject//${search}/${replace}}"
+}
+
+php::strtolower() {
+  print "$1" | tr '[A-Z]' '[a-z]'
+}
+
+php::strtoupper() {
+  print "$1" | tr '[a-z]' '[A-Z]'
+}
+
+php::trim() {
+  local value="$*"
+  print "$(php::ltrim "$(php::rtrim "${value}")")"
+}
+
+# Shows a stack trace.  Arguments are used as a message.
+imosh::stack_trace() {
+  local max_depth="${#BASH_LINENO[@]}"
+  local i=0
+  if [ "$*" == '' ]; then
+    echo 'imosh::stack_trace is called' >&2
+  else
+    echo "$*" >&2
+  fi
+  while (( i < max_depth - 1 )); do
+    local lineno="${BASH_LINENO[$((i))]}"
+    local file="${BASH_SOURCE[$((i+1))]}"
+    local function="${FUNCNAME[$((i+1))]}"
+    echo "  at ${function} (${file}:${lineno})" >&2
+    (( i += 1 )) || true
+  done
+}
+
+# __IMOSH_FLAGS_TYPE_<flag name>=<flag type>
+# __IMOSH_FLAGS_DESCRIPTION_<flag name>=<description>
+# __IMOSH_FLAGS_ALIASES=(from:to ...)
+
+imosh::internal::convert_type() {
+  local type="$1"; shift
+  local value="$*"
+
+  case "${type}" in
+    int)
+      if [[ "${value}" =~ ^-?[0-9]+$ ]]; then
+        print "${value}"
+      else
+        return 1
+      fi
+      ;;
+    string)
+      print "${value}"
+      ;;
+    bool)
+      case "${value}" in
+        1|T|t|[Tt]rue) print 1;;
+        0|F|f|[Ff]alse) print 0;;
+        *) return 1;;
+      esac
+      ;;
+    variant)
+      print "${value}"
+      ;;
+    *) LOG FATAL "no such type: ${type}";;
+  esac
+}
+
+imosh::internal::flag_type() {
+  local name="$1"
+
+  if [ "$#" -ne 1 ]; then
+    LOG FATAL 'flag_type requires 1 arugument.'
+  fi
+  eval print '${__IMOSH_FLAGS_TYPE_'"${name}"'}'
+}
+
+imosh::internal::define_flag() {
+  local type="$1"; shift
+
+  local ARGS_alias='' ARGS_alias_flag=0
+  eval "${IMOSH_PARSE_ARGUMENTS}"
+
+  if [ "$#" -lt 3 ]; then
+    LOG FATAL 'DEFINE_${type} requires 3+ arguments.'
+  fi
+  local name="$1"; shift
+  local default_value="$1"; shift
+  local description="$*"
+
+  # Change the default value based on its corresponding environment variable.
+  if php::isset "IMOSH_FLAGS_${name}"; then
+    default_value="$(eval print "\${IMOSH_FLAGS_${name}}")"
+  fi
+  if ! imosh::internal::convert_type \
+           "${type}" "${default_value}" >/dev/null; then
+    LOG FATAL "${type}'s default value should be ${type}: ${default_value}"
+  fi
+  default_value="$(imosh::internal::convert_type "${type}" "${default_value}")"
+  if php::isset "__IMOSH_FLAGS_TYPE_${name}"; then
+    LOG FATAL "already defined flag: ${name}"
+  fi
+  eval "FLAGS_${name}=$(imosh::shell_escape "${default_value}")"
+  eval "__IMOSH_FLAGS_TYPE_${name}=${type}"
+  if [ "${ARGS_alias}" != '' ]; then
+    imosh::internal::define_flag "${type}" --alias_flag \
+        "${ARGS_alias}" "${default_value}" "${description}"
+    eval "__IMOSH_FLAGS_ALIASES+=( \
+              $(imosh::shell_escape "${name}:${ARGS_alias}"))"
+  fi
+  if (( ! ARGS_alias_flag )); then
+    local escaped_default_value=''
+    case "${type}" in
+      int) escaped_default_value="${default_value}";;
+      bool)
+        if (( default_value )); then
+          escaped_default_value='true'
+        else
+          escaped_default_value='false'
+        fi
+        ;;
+      *) escaped_default_value="$(imosh::shell_escape "${default_value}")";;
+    esac
+    eval "__IMOSH_FLAGS_DEFAULT_${name}=$(
+              imosh::shell_escape "--${name}=${escaped_default_value}")"
+    if [ "${ARGS_alias}" != '' ]; then
+      description+=" (Alias: --${ARGS_alias})"
+    fi
+    eval "__IMOSH_FLAGS_DESCRIPTION_${name}=$(
+              imosh::shell_escape "${description}")"
+    __IMOSH_FLAGS+=("${name}")
+  fi
+}
+
+DEFINE_string() { imosh::internal::define_flag string "$@"; }
+DEFINE_int() { imosh::internal::define_flag int "$@"; }
+DEFINE_bool() { imosh::internal::define_flag bool "$@"; }
+DEFINE_double() { imosh::internal::define_flag double "$@"; }
+
+imosh::internal::man() {
+  echo ".TH ${0##*/} 1"; echo
+  echo '.SH SYNOPSIS'
+  echo ".B ${0##*/}"; echo '[\fIOPTIONS\fP] [\fIargs...\fP]'; echo
+  echo '.SH OPTIONS';
+  for flag_name in "${__IMOSH_FLAGS[@]}"; do
+    echo '.TP'
+    echo -n '\fB'
+    eval "echo -n \"\${__IMOSH_FLAGS_DEFAULT_${flag_name}}\""
+    echo '\fP'
+    eval "echo \"\${__IMOSH_FLAGS_DESCRIPTION_${flag_name}}\""
+    echo
+  done
+}
+
+imosh::internal::help() {
+  echo "Usage: ${0} [options ...] [args ...]"
+  echo "Options:"
+  for flag_name in "${__IMOSH_FLAGS[@]}"; do
+    eval "echo -n \"  \${__IMOSH_FLAGS_DEFAULT_${flag_name}}:\""
+    eval "echo \" \${__IMOSH_FLAGS_DESCRIPTION_${flag_name}}\""
+  done
+}
+
+imosh::internal::init() {
+  imosh::internal::parse_args flag "$@"
+  if [ "${#IMOSH_ARGS[@]}" -ne 0 ]; then
+    eval "${IMOSH_ARGS[@]}"
+  fi
+  if [ "${#__IMOSH_FLAGS_ALIASES[@]}" -ne 0 ]; then
+    for alias in "${__IMOSH_FLAGS_ALIASES[@]}"; do
+      eval "FLAGS_${alias%%:*}=\"\${FLAGS_${alias#*:}}\""
+      unset "FLAGS_${alias#*:}"
+    done
+  fi
+  if [ "${#IMOSH_ARGS[@]}" -ne 0 ]; then
+    readonly "${IMOSH_ARGS[@]}"
+  fi
+  if (( FLAGS_help )); then
+    if [ -t 1 ]; then
+      local man_file="${__IMOSH_CORE_TMPDIR}/man"
+      imosh::internal::man >"${man_file}"
+      man "${man_file}"
+    else
+      imosh::internal::help >&2
+    fi
+    exit 0
+  fi
+}
+
+readonly IMOSH_INIT='
+    set -e -u
+    imosh::internal::init "$@"
+    if [ "${#IMOSH_ARGV[@]}" -ne 0 ]; then
+      set -- "${IMOSH_ARGV[@]}"
+    fi'
+
+__IMOSH_FLAGS=()
+__IMOSH_FLAGS_ALIASES=()
+
+DEFINE_bool --alias=h help false 'Print this help message and exit.'
+DEFINE_bool 'alsologtostderr' false \
+            'Log messages go to stderr in addition to logfiles.'
+DEFINE_bool 'logtostderr' false \
+            'Log messages go to stderr instead of logfiles.'
+
+imosh::mktemp() {
+  TMPDIR="${TMPDIR%/}"
+  export IMOSH_TMPDIR="$(mktemp -d "${TMPDIR:-/tmp}/imosh.XXXXXX")"
+  if [ "${IMOSH_TMPDIR}" == '' -o  "${IMOSH_TMPDIR}" == '/' ]; then
+    LOG FATAL 'failed to create a temporary directory.'
+  fi
+
+  export __IMOSH_CORE_TMPDIR="${IMOSH_TMPDIR}/.imosh"
+  mkdir "${__IMOSH_CORE_TMPDIR}"
+  imosh::on_exit "rm -rf ${IMOSH_TMPDIR}"
+}
+
+TMPDIR="${TMPDIR:-/tmp}"
+export TMPDIR="${TMPDIR%/}"
+imosh::mktemp
+
+__IMOSH_PHP_EXECUTER_PID=''
+
+php::internal::kill() {
+  if (( FLAGS_disown_php )); then
+    if [ "${__IMOSH_PHP_EXECUTER_PID}" = "$$" ]; then
+      # Make sure that the target process exists.
+      if kill -0 "$(cat "${__IMOSH_PHP_PID}")" 2>/dev/null; then
+        php::internal::run 'exit(0);'
+        kill -TERM "$(cat "${__IMOSH_PHP_PID}")" 2>/dev/null
+      fi
+    fi
+  fi
+}
+
+php::internal::run() {
+  local __php_code="$1"
+  local __php_name=''
+  if [ "$#" -ge 2 ]; then __php_name="$2"; fi
+
+  local __php_line __php_return_code
+  local __php_new_line=$'\n'
+  __php_code="${__php_code//@/@@}"
+  __php_code="${__php_code//${__php_new_line}/@n}"
+  if (( FLAGS_disown_php )); then
+    php::internal::start
+    printf "%s\n" "${__php_code}" >&111
+    read __php_line <&110
+    read __php_return_code <&110
+  else
+    while :; do
+      read __php_line
+      read __php_return_code
+      break
+    done < <(printf "%s\n" "${__php_code}" |  php::internal::start)
+  fi
+
+  if [ "${__php_name}" != '' ]; then
+    eval "${__php_name}=${__php_line//@/\\}"
+  fi
+  if [ "${__php_return_code}" == '' ]; then return 1; fi
+  return "${__php_return_code}"
+}
+
+php::internal::start() {
+  if (( FLAGS_disown_php )); then
+    if [ "${__IMOSH_PHP_EXECUTER_PID}" = "$$" ]; then
+      # Make sure that the target process exists.
+      if kill -0 "$(cat "${__IMOSH_PHP_PID}")" 2>/dev/null; then
+        return;
+      fi
+    fi
+    exec 111>&- 110<&-
+    __IMOSH_PHP_STDIN="$(mktemp "${__IMOSH_CORE_TMPDIR}/php_stdin.XXXXXX")"
+    __IMOSH_PHP_STDOUT="$(mktemp "${__IMOSH_CORE_TMPDIR}/php_stdout.XXXXXX")"
+    __IMOSH_PHP_EXECUTER_PID="$$"
+    __IMOSH_PHP_PID="$(mktemp "${__IMOSH_CORE_TMPDIR}/php_pid.XXXXXX")"
+    rm "${__IMOSH_PHP_STDIN}" "${__IMOSH_PHP_STDOUT}"
+  fi
+  local php_script="$(mktemp "${__IMOSH_CORE_TMPDIR}/php_script.XXXXXX")"
+  cat << 'EOM' >"${php_script}"
+<?php
+
+function imosh_chop($str) { return substr($str, 0, strlen($str) - 1); }
+
+$translate = array(
+  "\r" => '@r', "\n" => '@n', '\\' => '@@',
+  '"' => '@x22', "'" => "@x27", '@' => '@x40');
+
+while (($line = fgets(STDIN)) !== FALSE) {
+  $line = strtr($line, array('@@' => '@', '@n' => "\n"));
+  ob_start();
+  $value = eval($line);
+  $output = ob_get_clean();
+  echo "\$'" . strtr($output, $translate) . "'\n";
+  echo intval($value) . "\n";
+  if (isset($argv[1]) && $argv[1] == 'once') exit(0);
+}
+
+EOM
+  LOG INFO 'Starting to run php...'
+  if (( ! FLAGS_disown_php )); then
+    php "${php_script}" once
+    return
+  fi
+  mkfifo "${__IMOSH_PHP_STDIN}"
+  mkfifo "${__IMOSH_PHP_STDOUT}"
+  bash -c "nohup php '${php_script}' \
+               <'${__IMOSH_PHP_STDIN}' \
+               >'${__IMOSH_PHP_STDOUT}' &
+           echo \$! >'${__IMOSH_PHP_PID}'"
+  LOG INFO "Opening PHP's STDIN..."
+  exec 111>"${__IMOSH_PHP_STDIN}"
+  LOG INFO "Opening PHP's STDOUT..."
+  exec 110<"${__IMOSH_PHP_STDOUT}"
+}
+
+DEFINE_bool disown_php false 'Disown a PHP process.'
+
+php::stop() {
+  php::internal::kill
+}
+
+php::start() {
+  if (( FLAGS_disown_php )); then
+    php::internal::start
+  fi
+}
+
+LOG INFO 'imosh is ready.'
+
