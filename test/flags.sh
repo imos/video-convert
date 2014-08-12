@@ -1,5 +1,7 @@
 #!/bin/bash
 
+set -e -u
+
 COMMAND="$(dirname "${BASH_SOURCE}")/../video-convert"
 
 run() {
