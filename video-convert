@@ -14,10 +14,13 @@ DEFINE_bool deinterlace false 'Enables deinterlace.'
 DEFINE_int subtitle '-1' "Subtitle's stream ID to overlay."
 DEFINE_string video 'v' \
     "Video's stream ID.  Use the first stream of audio streams."
+DEFINE_string video_codec 'libx264' 'Video codec.'
 DEFINE_string audio 'a' \
     "Audio's stream ID.  Use the first stream of audio streams."
+DEFINE_string audio_codec 'libfaac' 'Audio codec.'
 DEFINE_string output '' \
     'Video output.  This command shows stream details if this is not specified.'
+DEFINE_string ffmpeg 'ffmpeg' "ffmpeg's command path."
 
 eval "${IMOSH_INIT}"
 
@@ -29,7 +32,7 @@ if [ "$#" = 0 ]; then
   LOG FATAL 'Input file(s) must be specified.'
 fi
 
-run_ffmepg() {
+run_ffmpeg() {
   local flags=()
   if [ "${#FFMPEG_PREPROCESS_FLAGS[@]}" != 0 ]; then
     flags+=("${FFMPEG_PREPROCESS_FLAGS[@]}")
@@ -42,7 +45,7 @@ run_ffmepg() {
   fi
 
   LOG INFO 'Running: ffmpeg' "${flags[@]}"
-  ffmpeg "${flags[@]}"
+  "${FLAGS_ffmpeg}" "${flags[@]}"
 }
 
 set_input() {
@@ -68,14 +71,24 @@ set_video_flags() {
         '-deinterlace' '-filter:v' 'yadif')
   fi
 
-  FFMPEG_FLAGS+=(
-      -y -vcodec libx264 -bufsize 512k -coder 1 -g 250
-      -flags +loop -partitions +parti8x8+parti4x4+partp8x8+partb8x8
-      -me_method hex -subq 7 -me_range 16 -g 250 -keyint_min 25
-      -sc_threshold 40
-      -i_qfactor 0.71 -b_strategy 1 -qcomp 0.6 -qmin 10 -qmax 51 -qdiff 4
-      -direct-pred 3 -fast-pskip 1
-  )
+  case "${FLAGS_video_codec}" in
+    'libx264')
+      FFMPEG_FLAGS+=(
+          -vcodec libx264 -y -bufsize 512k -coder 1 -g 250
+          -flags +loop -partitions +parti8x8+parti4x4+partp8x8+partb8x8
+          -me_method hex -subq 7 -me_range 16 -g 250 -keyint_min 25
+          -sc_threshold 40
+          -i_qfactor 0.71 -b_strategy 1 -qcomp 0.6 -qmin 10 -qmax 51 -qdiff 4
+          -direct-pred 3 -fast-pskip 1
+      )
+      ;;
+    'copy')
+      FFMPEG_FLAGS+=(-vcodec copy)
+      ;;
+    *)
+      LOG FATAL "no such video codec: ${FLAGS_video_codec}"
+      ;;
+  esac
 
   local filters=()
   if (( FLAGS_subtitle > 0 )); then
@@ -90,7 +103,18 @@ set_video_flags() {
 
 set_audio_flags() {
   if [ "${FLAGS_audio}" = '' ]; then return; fi
-  FFMPEG_FLAGS+=(-acodec libfaac -ac 2 -ar 48000 -ab 128k)
+
+  case "${FLAGS_audio_codec}" in
+    'libfaac')
+      FFMPEG_FLAGS+=(-acodec libfaac -ac 2 -ar 48000 -ab 128k)
+      ;;
+    'copy')
+      FFMPEG_FLAGS+=(-acodec copy)
+      ;;
+    *)
+      LOG FATAL "no such audio codec: ${FLAGS_audio_codec}"
+      ;;
+  esac
 }
 
 set_output_flags() {
@@ -111,7 +135,8 @@ main() {
   set_input "$@"
   set_probe_flags
   set_output_flags
-  run_ffmepg
+  run_ffmpeg
 }
 
+LOG INFO "$@"
 main "$@"

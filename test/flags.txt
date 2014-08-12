@@ -1,0 +1,21 @@
+=== Output ===
+-i input.mp4 -vcodec libx264 -y -bufsize 512k -coder 1 -g 250 -flags +loop -partitions +parti8x8+parti4x4+partp8x8+partb8x8 -me_method hex -subq 7 -me_range 16 -g 250 -keyint_min 25 -sc_threshold 40 -i_qfactor 0.71 -b_strategy 1 -qcomp 0.6 -qmin 10 -qmax 51 -qdiff 4 -direct-pred 3 -fast-pskip 1 -acodec libfaac -ac 2 -ar 48000 -ab 128k -f ipod output.mp4
+
+=== Copy video stream ===
+-i input.mp4 -vcodec copy -acodec libfaac -ac 2 -ar 48000 -ab 128k -f ipod output.mp4
+
+=== Copy audio stream ===
+-i input.mp4 -vcodec libx264 -y -bufsize 512k -coder 1 -g 250 -flags +loop -partitions +parti8x8+parti4x4+partp8x8+partb8x8 -me_method hex -subq 7 -me_range 16 -g 250 -keyint_min 25 -sc_threshold 40 -i_qfactor 0.71 -b_strategy 1 -qcomp 0.6 -qmin 10 -qmax 51 -qdiff 4 -direct-pred 3 -fast-pskip 1 -acodec copy -f ipod output.mp4
+
+=== Threads ===
+-threads 4 -i input.mp4 -vcodec libx264 -y -bufsize 512k -coder 1 -g 250 -flags +loop -partitions +parti8x8+parti4x4+partp8x8+partb8x8 -me_method hex -subq 7 -me_range 16 -g 250 -keyint_min 25 -sc_threshold 40 -i_qfactor 0.71 -b_strategy 1 -qcomp 0.6 -qmin 10 -qmax 51 -qdiff 4 -direct-pred 3 -fast-pskip 1 -acodec libfaac -ac 2 -ar 48000 -ab 128k -f ipod output.mp4
+
+=== Deinterlace ===
+-i input.mp4 -deinterlace -filter:v yadif -vcodec libx264 -y -bufsize 512k -coder 1 -g 250 -flags +loop -partitions +parti8x8+parti4x4+partp8x8+partb8x8 -me_method hex -subq 7 -me_range 16 -g 250 -keyint_min 25 -sc_threshold 40 -i_qfactor 0.71 -b_strategy 1 -qcomp 0.6 -qmin 10 -qmax 51 -qdiff 4 -direct-pred 3 -fast-pskip 1 -acodec libfaac -ac 2 -ar 48000 -ab 128k -f ipod output.mp4
+
+=== Subtitle ===
+-i input.mp4 -vcodec libx264 -y -bufsize 512k -coder 1 -g 250 -flags +loop -partitions +parti8x8+parti4x4+partp8x8+partb8x8 -me_method hex -subq 7 -me_range 16 -g 250 -keyint_min 25 -sc_threshold 40 -i_qfactor 0.71 -b_strategy 1 -qcomp 0.6 -qmin 10 -qmax 51 -qdiff 4 -direct-pred 3 -fast-pskip 1 -acodec libfaac -ac 2 -ar 48000 -ab 128k -filter_complex [0:4]setpts=PTS+0/TB[SUB];[0:v][SUB]overlay -f ipod output.mp4
+
+=== Second audio ===
+-i input.mp4 -vcodec libx264 -y -bufsize 512k -coder 1 -g 250 -flags +loop -partitions +parti8x8+parti4x4+partp8x8+partb8x8 -me_method hex -subq 7 -me_range 16 -g 250 -keyint_min 25 -sc_threshold 40 -i_qfactor 0.71 -b_strategy 1 -qcomp 0.6 -qmin 10 -qmax 51 -qdiff 4 -direct-pred 3 -fast-pskip 1 -acodec libfaac -ac 2 -ar 48000 -ab 128k -f ipod output.mp4
+
